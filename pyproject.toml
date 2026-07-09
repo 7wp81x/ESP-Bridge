@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "espbridge"
+version = "1.0.0"
+description = "Framed binary USB bridge protocol for talking to an ESP32 from Termux (or any Linux host) — no root required."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "pyusb>=1.2.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/7wp81x/NRSuite"
+
+[tool.setuptools.packages.find]
+where = ["src"]
