@@ -9,7 +9,7 @@ use case — it just gets JSON commands and binary chunks reliably between
 an ESP32 and a host process over USB CDC, with automatic root/no-root
 backend detection. Use it to build your own ESP32-to-Termux tools.
 
-Pairs with the [`BridgeProtocol`](../BridgeProtocol) PlatformIO library on
+Pairs with the [`BridgeProtocol`](https://github.com/7wp81x/BridgeProtocol) PlatformIO library on
 the firmware side — install both and the two speak the same frames out of
 the box.
 
