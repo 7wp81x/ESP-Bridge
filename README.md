@@ -1,4 +1,4 @@
-# espbridge
+# ESP-Bridge
 
 Framed binary USB bridge protocol for talking to an ESP32 from Termux — or
 any Linux host — **no root required**.
@@ -18,7 +18,7 @@ the box.
 ```bash
 pip install espbridge          # once published
 # or, for local development:
-git clone https://github.com/7wp81x/espbridge-python
+git clone https://github.com/7wp81x/ESP-Bridge
 cd espbridge-python
 pip install -e .
 ```
