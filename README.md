@@ -19,7 +19,7 @@ the box.
 pip install espbridge          # once published
 # or, for local development:
 git clone https://github.com/7wp81x/ESP-Bridge
-cd espbridge-python
+cd ESP-Bridge
 pip install -e .
 ```
 
