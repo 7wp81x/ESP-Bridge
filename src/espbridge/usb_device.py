@@ -249,20 +249,47 @@ def launch_with_fd(cmd: str, device_path: str, log_file: str,
                 except BlockingIOError:
                     pass
 
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
+                # Flush on EITHER \n or \r as a line boundary. Anything the
+                # wrapped process prints with \r (e.g. a progress indicator)
+                # has no \n until it finishes, so splitting only on \n means
+                # such output sits buffered here indefinitely and then dumps
+                # all at once when a real \n finally shows up - looking like
+                # the process hung when it was actually working the whole
+                # time. Treating \r as a boundary too streams it live.
+                while True:
+                    nl = buf.find(b"\n")
+                    cr = buf.find(b"\r")
+                    if nl == -1 and cr == -1:
+                        break
+                    if nl == -1:
+                        idx, sep = cr, b"\r"
+                    elif cr == -1:
+                        idx, sep = nl, b"\n"
+                    else:
+                        idx, sep = (cr, b"\r") if cr < nl else (nl, b"\n")
+                    line, buf = buf[:idx], buf[idx + 1:]
                     if tail_fn:
-                        tail_fn(line.decode("utf-8", errors="replace") + "\n")
+                        tail_fn(line.decode("utf-8", errors="replace") + sep.decode())
 
                 if done:
                     try:
                         buf += os.read(fd, 65536)
                     except BlockingIOError:
                         pass
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
+                    while True:
+                        nl = buf.find(b"\n")
+                        cr = buf.find(b"\r")
+                        if nl == -1 and cr == -1:
+                            break
+                        if nl == -1:
+                            idx, sep = cr, b"\r"
+                        elif cr == -1:
+                            idx, sep = nl, b"\n"
+                        else:
+                            idx, sep = (cr, b"\r") if cr < nl else (nl, b"\n")
+                        line, buf = buf[:idx], buf[idx + 1:]
                         if tail_fn:
-                            tail_fn(line.decode("utf-8", errors="replace") + "\n")
+                            tail_fn(line.decode("utf-8", errors="replace") + sep.decode())
                     if buf and tail_fn:
                         tail_fn(buf.decode("utf-8", errors="replace") + "\n")
                     break
@@ -357,24 +384,47 @@ def init_uart_bridge(device):
             # CH340 line initialization handshake
             device.ctrl_transfer(0x40, 0xA1, 0, 0, None)
 
-            # Set baud rate to 115200
-            # CH340G uses a single 0x9A write with these divisor values.
-            # The two-write sequence with 0x1312/0xB483 is a CH341A-specific
-            # sequence and produces the wrong baud rate on CH340G.
-            device.ctrl_transfer(0x40, 0x9A, 0xC380, 0xEB00, None)
-
-            # Set line control: 8 data bits, 1 stop bit, no parity (8N1)
-            device.ctrl_transfer(0x40, 0x9A, 0x2518, 0x0050, None)
+            # Set baud rate to 115200 using the real CH340/CH341 divisor
+            # algorithm (from the Linux kernel's ch341.c driver - this is
+            # what actually runs whenever esptool.py works over a real
+            # /dev/ttyUSB* on Linux, so it's a known-correct reference).
+            #
+            # An earlier version of this code sent
+            #   ctrl_transfer(0x40, 0x9A, 0xC380, 0xEB00, None)
+            # which has wValue and wIndex reversed relative to the real
+            # protocol (wValue must be the constant 0x1312, wIndex the
+            # computed divisor) - it was writing garbage to the baud rate
+            # generator. Combined with a bogus 8N1 byte (0x0050 instead of
+            # the real LCR encoding 0xC3), the bridge was very likely never
+            # actually running at 115200 8N1 - explaining flaky syncs/
+            # frame drops that had nothing to do with the reset-pin timing.
+            baud_rate = 115200
+            factor = 1532620800 // baud_rate  # CH341_BAUDBASE_FACTOR
+            divisor = 3                        # CH341_BAUDBASE_DIVMAX
+            while factor > 0xFFF0 and divisor:
+                factor >>= 3
+                divisor -= 1
+            factor = 0x10000 - factor
+            a = ((factor & 0xFF00) | divisor) | 0x80  # BIT(7): CH341A
+            # packet-buffering flag - harmless on plain CH340/CH340G, and
+            # is what the modern kernel driver sets unconditionally.
+            lcr_8n1 = 0x80 | 0x40 | 0x03  # ENABLE_RX | ENABLE_TX | CS8
+            device.ctrl_transfer(0x40, 0x9A, 0x1312, a, None)
+            device.ctrl_transfer(0x40, 0x9A, 0x2518, lcr_8n1, None)
 
             # ── HARDWARE RESET TOGGLE FOR ESP32 AUTO-RESET CIRCUIT ────────────
-            # 0xA4 modem control bits are ACTIVE-LOW on CH340.
+            # 0xA4 modem control bits are ACTIVE-LOW. Bit weights per the
+            # Linux kernel ch341.c driver: bit5 (0x20) = DTR, bit6 (0x40) =
+            # RTS. (Earlier revision of this code used bit4 (0x10) for RTS,
+            # which isn't wired to anything - RTS never actually toggled,
+            # so this reset pulse silently did nothing on real hardware.)
             #   0xFF = DTR+RTS de-asserted (idle / lines released)
-            #   0xCF = DTR+RTS asserted   (bits 4+5 pulled low → EN+BOOT driven)
+            #   0x9F = DTR+RTS asserted   (bits 5+6 pulled low → EN+BOOT driven)
             #
             # To get a clean normal-sketch boot (not bootloader):
             #   1. Assert both  → ESP32 goes into reset
             #   2. Release both → EN rises, BOOT pin=1 → runs sketch
-            device.ctrl_transfer(0x40, 0xA4, 0xCF, 0, None)  # Assert DTR+RTS → reset
+            device.ctrl_transfer(0x40, 0xA4, 0x9F, 0, None)  # Assert DTR+RTS → reset
             time.sleep(0.1)                                    # Hold reset
             device.ctrl_transfer(0x40, 0xA4, 0xFF, 0, None)  # Release → normal boot
             time.sleep(0.5)               
