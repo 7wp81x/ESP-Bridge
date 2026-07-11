@@ -20,6 +20,7 @@ jobs:
 
       - name: Build
         run: |
+          rm -rf dist build *.egg-info src/*.egg-info
           pip install build
           python -m build
 
