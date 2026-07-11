@@ -70,6 +70,10 @@ from .usb_device import (
     reset_endpoint_toggles,
     describe_device,
     init_uart_bridge,
+    set_uart_bridge_baud,
+    is_uart_bridge,
+    set_dtr_rts,
+    UART_BRIDGE_VIDPIDS,
     ESP32_KNOWN,
 )
 
@@ -85,7 +89,8 @@ __all__ = [
     "list_usb_devices", "request_permission", "open_usb_device", "auto_detect_device",
     "launch_with_fd", "relaunch_with_fd", "wrap_fd", "wrap_direct", "find_usb_device_direct",
     "claim_device", "get_cdc_endpoints", "reset_endpoint_toggles",
-    "describe_device", "init_uart_bridge", "ESP32_KNOWN",
+    "describe_device", "init_uart_bridge", "set_uart_bridge_baud", "is_uart_bridge",
+    "set_dtr_rts", "UART_BRIDGE_VIDPIDS", "ESP32_KNOWN",
 ]
 
 __version__ = "1.0.0"

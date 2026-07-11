@@ -239,6 +239,12 @@ def launch_with_fd(cmd: str, device_path: str, log_file: str,
 
     def _tail():
         fd = os.open(log_file, os.O_RDONLY | os.O_NONBLOCK)
+        # Start at EOF: the parent already printed its own pre-fork lines
+        # (and the header) directly to the terminal, so replaying them from
+        # the beginning of the file here would duplicate them. Only content
+        # appended after the tail starts (i.e. the child's own logging)
+        # should flow through to the terminal via tail_fn.
+        os.lseek(fd, 0, os.SEEK_END)
         buf = b""
         try:
             while True:
@@ -249,20 +255,49 @@ def launch_with_fd(cmd: str, device_path: str, log_file: str,
                 except BlockingIOError:
                     pass
 
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
+                # Flush on EITHER \n or \r as a line boundary. Progress bars
+                # (see nrflash.py's _progress()) update in place using \r
+                # with no \n until the transfer completes - splitting only
+                # on \n meant every \r-joined progress update sat buffered
+                # here until the final \n showed up at 100%, so the whole
+                # flash appeared "stuck" and then jumped straight to 100%
+                # once it finally flushed. Treating \r as a boundary too
+                # lets each progress tick stream through immediately, same
+                # as it would on a real terminal.
+                while True:
+                    nl = buf.find(b"\n")
+                    cr = buf.find(b"\r")
+                    if nl == -1 and cr == -1:
+                        break
+                    if nl == -1:
+                        idx, sep = cr, b"\r"
+                    elif cr == -1:
+                        idx, sep = nl, b"\n"
+                    else:
+                        idx, sep = (cr, b"\r") if cr < nl else (nl, b"\n")
+                    line, buf = buf[:idx], buf[idx + 1:]
                     if tail_fn:
-                        tail_fn(line.decode("utf-8", errors="replace") + "\n")
+                        tail_fn(line.decode("utf-8", errors="replace") + sep.decode())
 
                 if done:
                     try:
                         buf += os.read(fd, 65536)
                     except BlockingIOError:
                         pass
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
+                    while True:
+                        nl = buf.find(b"\n")
+                        cr = buf.find(b"\r")
+                        if nl == -1 and cr == -1:
+                            break
+                        if nl == -1:
+                            idx, sep = cr, b"\r"
+                        elif cr == -1:
+                            idx, sep = nl, b"\n"
+                        else:
+                            idx, sep = (cr, b"\r") if cr < nl else (nl, b"\n")
+                        line, buf = buf[:idx], buf[idx + 1:]
                         if tail_fn:
-                            tail_fn(line.decode("utf-8", errors="replace") + "\n")
+                            tail_fn(line.decode("utf-8", errors="replace") + sep.decode())
                     if buf and tail_fn:
                         tail_fn(buf.decode("utf-8", errors="replace") + "\n")
                     break
@@ -357,24 +392,47 @@ def init_uart_bridge(device):
             # CH340 line initialization handshake
             device.ctrl_transfer(0x40, 0xA1, 0, 0, None)
 
-            # Set baud rate to 115200
-            # CH340G uses a single 0x9A write with these divisor values.
-            # The two-write sequence with 0x1312/0xB483 is a CH341A-specific
-            # sequence and produces the wrong baud rate on CH340G.
-            device.ctrl_transfer(0x40, 0x9A, 0xC380, 0xEB00, None)
-
-            # Set line control: 8 data bits, 1 stop bit, no parity (8N1)
-            device.ctrl_transfer(0x40, 0x9A, 0x2518, 0x0050, None)
+            # Set baud rate to 115200 using the real CH340/CH341 divisor
+            # algorithm (from the Linux kernel's ch341.c driver - this is
+            # what actually runs whenever esptool.py works over a real
+            # /dev/ttyUSB* on Linux, so it's a known-correct reference).
+            #
+            # An earlier version of this code sent
+            #   ctrl_transfer(0x40, 0x9A, 0xC380, 0xEB00, None)
+            # which has wValue and wIndex reversed relative to the real
+            # protocol (wValue must be the constant 0x1312, wIndex the
+            # computed divisor) - it was writing garbage to the baud rate
+            # generator. Combined with a bogus 8N1 byte (0x0050 instead of
+            # the real LCR encoding 0xC3), the bridge was very likely never
+            # actually running at 115200 8N1 - explaining sync failures
+            # that had nothing to do with the reset-pin timing.
+            baud_rate = 115200
+            factor = 1532620800 // baud_rate  # CH341_BAUDBASE_FACTOR
+            divisor = 3                        # CH341_BAUDBASE_DIVMAX
+            while factor > 0xFFF0 and divisor:
+                factor >>= 3
+                divisor -= 1
+            factor = 0x10000 - factor
+            a = ((factor & 0xFF00) | divisor) | 0x80  # BIT(7): CH341A
+            # packet-buffering flag - harmless on plain CH340/CH340G, and
+            # is what the modern kernel driver sets unconditionally.
+            lcr_8n1 = 0x80 | 0x40 | 0x03  # ENABLE_RX | ENABLE_TX | CS8
+            device.ctrl_transfer(0x40, 0x9A, 0x1312, a, None)
+            device.ctrl_transfer(0x40, 0x9A, 0x2518, lcr_8n1, None)
 
             # ── HARDWARE RESET TOGGLE FOR ESP32 AUTO-RESET CIRCUIT ────────────
-            # 0xA4 modem control bits are ACTIVE-LOW on CH340.
+            # 0xA4 modem control bits are ACTIVE-LOW. Bit weights per the
+            # Linux kernel ch341.c driver: bit5 (0x20) = DTR, bit6 (0x40) =
+            # RTS. (Earlier revision of this code used bit4 (0x10) for RTS,
+            # which isn't wired to anything - RTS never actually toggled,
+            # so this reset pulse silently did nothing on real hardware.)
             #   0xFF = DTR+RTS de-asserted (idle / lines released)
-            #   0xCF = DTR+RTS asserted   (bits 4+5 pulled low → EN+BOOT driven)
+            #   0x9F = DTR+RTS asserted   (bits 5+6 pulled low → EN+BOOT driven)
             #
             # To get a clean normal-sketch boot (not bootloader):
             #   1. Assert both  → ESP32 goes into reset
             #   2. Release both → EN rises, BOOT pin=1 → runs sketch
-            device.ctrl_transfer(0x40, 0xA4, 0xCF, 0, None)  # Assert DTR+RTS → reset
+            device.ctrl_transfer(0x40, 0xA4, 0x9F, 0, None)  # Assert DTR+RTS → reset
             time.sleep(0.1)                                    # Hold reset
             device.ctrl_transfer(0x40, 0xA4, 0xFF, 0, None)  # Release → normal boot
             time.sleep(0.5)               
@@ -409,6 +467,125 @@ def init_uart_bridge(device):
 
 # Backward-compatibility alias — callers using the old name keep working
 init_cp2102_bridge = init_uart_bridge
+
+
+def set_uart_bridge_baud(device, baud: int):
+    """
+    Reprogram just the baud-rate divisor on the already-initialized UART
+    bridge, without touching DTR/RTS or re-running the reset handshake.
+
+    init_uart_bridge() hardcodes every bridge to 115200 and nothing ever
+    calls it again, so a run stays pinned at ~11.5 KB/s (115200 baud / 10
+    bits-per-byte) even once the stub flasher is up and could handle far
+    more. Real esptool renegotiates to a high rate (921600 is the common
+    default) right after the stub greets it, using CMD_CHANGE_BAUDRATE on
+    the wire side plus the equivalent host-side divisor write. This is
+    the host-side half of that; the caller is responsible for also
+    sending CMD_CHANGE_BAUDRATE to the stub with the same value so both
+    ends agree before the next command is sent.
+    """
+    vid, pid = device.idVendor, device.idProduct
+
+    if (vid, pid) == (0x10C4, 0xEA60):  # CP2102
+        # CP210x wants the literal baud rate written as a 4-byte
+        # little-endian value via a separate vendor request, not the
+        # 0xC200-style divisor code used for the fixed 115200 case in
+        # init_uart_bridge().
+        import struct
+        device.ctrl_transfer(0x40, 0x1E, 0, 0, struct.pack("<I", baud))
+
+    elif (vid, pid) in [(0x1A86, 0x7523), (0x1A86, 0x55D4)]:  # CH340/CH341
+        factor = 1532620800 // baud  # CH341_BAUDBASE_FACTOR
+        divisor = 3
+        while factor > 0xFFF0 and divisor:
+            factor >>= 3
+            divisor -= 1
+        factor = 0x10000 - factor
+        a = ((factor & 0xFF00) | divisor) | 0x80
+        device.ctrl_transfer(0x40, 0x9A, 0x1312, a, None)
+
+    elif (vid, pid) == (0x0403, 0x6001):  # FTDI FT232
+        # FTDI's baud divisor is chip-clock/16/baud rounded to its fixed-
+        # point encoding; 3000000 is the FT232's base clock.
+        divisor = 3000000 // baud
+        device.ctrl_transfer(0x40, 0x03, divisor & 0xFFFF, 0, None)
+
+    else:
+        raise RuntimeError(
+            f"set_uart_bridge_baud: no baud-rate handler for VID:PID "
+            f"{vid:04X}:{pid:04X}"
+        )
+
+
+# UART bridge VID:PIDs this tool knows how to drive DTR/RTS on directly.
+# (Native USB-CDC ESP32-S3/C3/S2 boards go through cdc_reset.py instead —
+# see get_cdc_endpoints()'s native-CDC branch above.)
+UART_BRIDGE_VIDPIDS = {
+    (0x10C4, 0xEA60),  # CP2102
+    (0x1A86, 0x7523),  # CH340 / CH340G
+    (0x1A86, 0x55D4),  # CH9102
+    (0x0403, 0x6001),  # FTDI FT232
+}
+
+
+def is_uart_bridge(device) -> bool:
+    """True if this device is a CP2102/CH340/CH9102/FTDI serial bridge."""
+    return (device.idVendor, device.idProduct) in UART_BRIDGE_VIDPIDS
+
+
+def set_dtr_rts(device, dtr: bool, rts: bool) -> None:
+    """
+    Assert/de-assert the DTR and RTS handshake lines on a UART bridge chip.
+
+    This is the single primitive uart_reset.py builds the classic
+    ESP32/ESP8266 "GPIO0 + EN" reset dance on top of. `dtr=True` /
+    `rts=True` means the signal is ASSERTED — on every board covered here
+    that's wired through an inverting NPN transistor, so asserted actually
+    drives the physical pin (GPIO0 or EN) LOW. That matches how esptool.py
+    treats its own `_setDTR`/`_setRTS` calls, so the sequences in
+    uart_reset.py read the same as esptool's classic_reset/usb_reset.
+
+    Silently ignored (raises RuntimeError up to caller) if the device isn't
+    one of the known bridge chips — native USB CDC boards don't have real
+    DTR/RTS lines and must use cdc_reset.py instead.
+    """
+    vid, pid = device.idVendor, device.idProduct
+
+    if (vid, pid) == (0x10C4, 0xEA60):
+        # CP2102: SILABSER_SET_MHS_REQUEST. High byte = which lines to
+        # drive (mask), low byte = state to drive them to.
+        state = (0x01 if dtr else 0) | (0x02 if rts else 0)
+        device.ctrl_transfer(0x41, 0x01, 0x0300 | state, 0, None)
+
+    elif (vid, pid) in [(0x1A86, 0x7523), (0x1A86, 0x55D4)]:
+        # CH340/CH340G/CH9102: modem control byte on request 0xA4 is
+        # ACTIVE-LOW. Bit weights taken from the Linux kernel ch341.c
+        # driver (CH341_BIT_DTR/CH341_BIT_RTS), which is what actually
+        # gets exercised when esptool.py works over a real /dev/ttyUSB*:
+        #   bit5 (0x20) = DTR
+        #   bit6 (0x40) = RTS
+        # (An earlier version of this code used bit4 (0x10) for RTS,
+        # which isn't wired to anything meaningful on real hardware - RTS
+        # never actually toggled, so bootloader entry silently no-opped
+        # while everything else (line coding, DTR-only writes) kept
+        # working, which is exactly what made this bug hard to spot.)
+        value = 0xFF
+        if dtr:
+            value &= ~0x20
+        if rts:
+            value &= ~0x40
+        device.ctrl_transfer(0x40, 0xA4, value & 0xFF, 0, None)
+
+    elif (vid, pid) == (0x0403, 0x6001):
+        # FTDI FT232: SIO_SET_MODEM_CTRL_REQUEST. Low byte = state
+        # (bit0=DTR, bit1=RTS), high byte = mask (which bits to apply).
+        state = (0x01 if dtr else 0) | (0x02 if rts else 0)
+        device.ctrl_transfer(0x40, 0x01, 0x0300 | state, 0, None)
+
+    else:
+        raise RuntimeError(
+            f"set_dtr_rts: {vid:04X}:{pid:04X} is not a known UART bridge chip"
+        )
 
 
 def wrap_direct(vid_pid_filter: list[tuple] | None = None):
@@ -473,7 +650,7 @@ def wrap_fd(fd: int):
 def describe_device(device) -> str:
     vid, pid = device.idVendor, device.idProduct
     label = ESP32_KNOWN.get((vid, pid), "Unknown device")
-    return f"{vid:04X}:{pid:04X} {label}"
+    return f"{vid:04X}:{pid:04X}  {label}"
 
 
 def get_cdc_endpoints(device):
