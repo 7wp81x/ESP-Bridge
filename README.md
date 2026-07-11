@@ -16,8 +16,10 @@ the box.
 ## Install
 
 ```bash
-pip install espbridge          # once published
-# or, for local development:
+pip install espbridge
+```
+or
+```bash
 git clone https://github.com/7wp81x/ESP-Bridge
 cd ESP-Bridge
 pip install -e .
