@@ -647,6 +647,62 @@ def wrap_fd(fd: int):
 
 
 
+def find_cdc_control_interface(device, data_intf_num: int) -> int:
+    """
+    Find the CDC-ACM *control/communications* interface (bInterfaceClass 0x02)
+    paired with the given CDC *data* interface (bInterfaceClass 0x0A).
+
+    Boards that expose more than just CDC (e.g. ESP32-S3 with USB-JTAG active)
+    don't always put the control interface at #0 - JTAG can sit at interface 0
+    and push CDC control/data to 1/2 instead. Hardcoding control_interface=0
+    in open_native_cdc_port() can then target the wrong (possibly
+    kernel/OS-claimed) interface, producing "Resource busy" when asserting DTR.
+    """
+    cfg = device.get_active_configuration()
+    candidate = data_intf_num - 1
+    for intf in cfg:
+        if intf.bInterfaceNumber == candidate and intf.bInterfaceClass == 0x02:
+            return candidate
+    for intf in cfg:
+        if intf.bInterfaceClass == 0x02:
+            return intf.bInterfaceNumber
+    return 0
+
+
+def is_native_cdc(device) -> bool:
+    """True if this is a native USB-CDC ESP32 (S2/S3/C3), not a UART bridge chip."""
+    return (device.idVendor, device.idProduct) in [(0x303A, 0x1001), (0x303A, 0x0002)]
+
+
+def open_native_cdc_port(device, control_interface: int = 0) -> None:
+    """
+    Assert DTR on a native USB-CDC ESP32 via the standard CDC-ACM
+    SET_CONTROL_LINE_STATE class request (bRequest 0x22, bmRequestType
+    0x21; wValue bit0=DTR, bit1=RTS).
+
+    Native USB-CDC boards (ESP32-S2/S3/C3 with ARDUINO_USB_CDC_ON_BOOT)
+    gate `Serial` on the host having "opened" the port - firmware using
+    the common `while (!Serial) { delay(10); }` startup guard will never
+    leave setup() until DTR is asserted, so nothing (not even
+    Serial.println, not the BridgeProtocol command loop) ever runs.
+
+    UART-bridge chips (CP2102/CH340/FTDI) are untouched by this - they
+    get DTR/RTS handled separately by init_uart_bridge()/set_dtr_rts(),
+    which use each chip's own vendor-specific control requests instead
+    of the CDC-ACM class request used here.
+
+    No-op (raises) if called on a non-native-CDC device; callers should
+    guard with `if is_native_cdc(device):` first, same as is_uart_bridge().
+    """
+    if not is_native_cdc(device):
+        raise RuntimeError(
+            "open_native_cdc_port: device is not a known native USB-CDC "
+            "ESP32 - use init_uart_bridge()/set_dtr_rts() for bridge chips instead"
+        )
+    value = 0x01  # DTR asserted, RTS released
+    device.ctrl_transfer(0x21, 0x22, value, control_interface, None)
+
+
 def describe_device(device) -> str:
     vid, pid = device.idVendor, device.idProduct
     label = ESP32_KNOWN.get((vid, pid), "Unknown device")

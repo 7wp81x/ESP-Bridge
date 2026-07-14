@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "espbridge"
-version = "1.0.1"
+version = "1.1.0"
 description = "Framed binary USB bridge protocol for talking to an ESP32 from Termux (or any Linux host) — no root required."
 readme = "README.md"
 requires-python = ">=3.9"

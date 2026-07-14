@@ -18,6 +18,14 @@ Typical usage:
     eb.claim_device(device, iface, fd_wrapped=(backend == "termux"))
     eb.reset_endpoint_toggles(device, ep_in, ep_out)
 
+    if eb.is_native_cdc(device):
+        # ESP32-S2/S3 native USB-CDC boards gate `Serial` on the host
+        # asserting DTR (firmware using `while (!Serial) {}` never leaves
+        # setup() otherwise). UART-bridge chips (CP2102/CH340/FTDI) don't
+        # need this - they're handled by init_uart_bridge()/set_dtr_rts().
+        ctrl_iface = eb.find_cdc_control_interface(device, iface)
+        eb.open_native_cdc_port(device, ctrl_iface)
+
     sender   = eb.Sender(device, ep_out)
     receiver = eb.ReceiverThread(device, ep_in)
     receiver.start()
@@ -73,6 +81,9 @@ from .usb_device import (
     set_uart_bridge_baud,
     is_uart_bridge,
     set_dtr_rts,
+    is_native_cdc,
+    find_cdc_control_interface,
+    open_native_cdc_port,
     UART_BRIDGE_VIDPIDS,
     ESP32_KNOWN,
 )
@@ -90,7 +101,10 @@ __all__ = [
     "launch_with_fd", "relaunch_with_fd", "wrap_fd", "wrap_direct", "find_usb_device_direct",
     "claim_device", "get_cdc_endpoints", "reset_endpoint_toggles",
     "describe_device", "init_uart_bridge", "set_uart_bridge_baud", "is_uart_bridge",
-    "set_dtr_rts", "UART_BRIDGE_VIDPIDS", "ESP32_KNOWN",
+    "set_dtr_rts", "is_native_cdc", "find_cdc_control_interface",
+    "open_native_cdc_port", "UART_BRIDGE_VIDPIDS", "ESP32_KNOWN",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
+__author__ = "7wp81x"
+__url__ = "https://github.com/7wp81x/ESP-Bridge"
