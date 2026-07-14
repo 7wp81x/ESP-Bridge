@@ -20,6 +20,8 @@ All other public helpers work the same regardless of backend.
 import os
 import json
 import ctypes
+import signal
+import time
 import usb.core
 import usb.backend.libusb1 as libusb1
 
@@ -82,7 +84,19 @@ def _run_termux_api(*args, timeout: int = 15) -> str:
 
     Args are everything *after* the binary path, e.g.:
         _run_termux_api("Usb", "-a", "list")
+
+    `timeout` is enforced with select() on the read end. This matters
+    because termux-api's Usb actions go through an Android broadcast to
+    a background service - if the user cancels the permission dialog (or
+    the service just never replies), the child process can sit forever
+    without closing its stdout pipe, and a bare os.read() blocks with no
+    way out. When that happens we SIGKILL the child and reap it so the
+    process (and the Android-side termux-api service, which otherwise
+    stays wedged on the abandoned request and can stall later calls too)
+    doesn't stay stuck.
     """
+    import select
+
     r_fd, w_fd = os.pipe()
 
     pid = os.fork()
@@ -102,12 +116,36 @@ def _run_termux_api(*args, timeout: int = 15) -> str:
     else:
         os.close(w_fd)
         chunks = []
+        deadline = time.monotonic() + timeout
+        timed_out = False
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            ready, _, _ = select.select([r_fd], [], [], remaining)
+            if not ready:
+                timed_out = True
+                break
             chunk = os.read(r_fd, 4096)
             if not chunk:
                 break
             chunks.append(chunk)
         os.close(r_fd)
+
+        if timed_out:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(pid, 0)
+            raise RuntimeError(
+                f"termux-api timed out after {timeout}s with no response "
+                f"(args={args}). If a permission dialog was showing, this "
+                f"usually means it was cancelled or dismissed without a "
+                f"tap - try again and explicitly Allow or Deny it."
+            )
+
         _, status = os.waitpid(pid, 0)
         exit_code = os.waitstatus_to_exitcode(status)
         output = b"".join(chunks).decode("utf-8", errors="replace").strip()
@@ -139,12 +177,19 @@ def request_permission(device_path: str) -> bool:
     Show the Android USB-permission dialog for device_path.
     Returns True if the user granted permission.
     Termux backend only.
+
+    Uses a longer timeout than the default (60s vs 15s) since this
+    blocks on an actual human tapping Allow/Deny, not just an API round
+    trip - see _run_termux_api()'s timeout handling for what happens if
+    the dialog gets cancelled/dismissed without a tap and nothing ever
+    comes back.
     """
     try:
         out = _run_termux_api(
             "Usb", "-a", "permission",
             "--ez", "request", "true",
             "--es", "device", device_path,
+            timeout=60,
         )
         return "yes" in out.lower() or "granted" in out.lower()
     except Exception:
@@ -156,13 +201,17 @@ def open_usb_device(device_path: str, callback_cmd: str,
     """
     Ask termux-api to open device_path and call callback_cmd with the fd.
     Termux backend only.
+
+    Also shows the permission dialog if it hasn't been granted yet, so
+    it gets the same longer 60s timeout as request_permission() rather
+    than the 15s default meant for non-interactive calls.
     """
     params = [
         "Usb", "-a", "open",
         "--ez", "request", "true",
         "--es", "device", device_path,
     ]
-    out = _run_termux_api(*params)
+    out = _run_termux_api(*params, timeout=60)
     _check_api_output(out)
 
     fd_str = out.strip()
