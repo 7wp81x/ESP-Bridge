@@ -105,6 +105,6 @@ __all__ = [
     "open_native_cdc_port", "UART_BRIDGE_VIDPIDS", "ESP32_KNOWN",
 ]
 
-__version__ = "1.1.1"
+__version__ = "1.1.0"
 __author__ = "7wp81x"
 __url__ = "https://github.com/7wp81x/ESP-Bridge"
