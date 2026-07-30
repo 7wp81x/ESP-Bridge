@@ -567,8 +567,9 @@ def set_uart_bridge_baud(device, baud: int):
 
 
 # UART bridge VID:PIDs this tool knows how to drive DTR/RTS on directly.
-# (Native USB-CDC ESP32-S3/C3/S2 boards go through cdc_reset.py instead —
-# see get_cdc_endpoints()'s native-CDC branch above.)
+# (Native USB-CDC ESP32-S3/C3/S2 boards go through the native-CDC control
+# path instead — see is_native_cdc()/open_native_cdc_port() below, and
+# get_cdc_endpoints()'s ntailative-CDC branch above.)
 UART_BRIDGE_VIDPIDS = {
     (0x10C4, 0xEA60),  # CP2102
     (0x1A86, 0x7523),  # CH340 / CH340G
@@ -586,17 +587,18 @@ def set_dtr_rts(device, dtr: bool, rts: bool) -> None:
     """
     Assert/de-assert the DTR and RTS handshake lines on a UART bridge chip.
 
-    This is the single primitive uart_reset.py builds the classic
-    ESP32/ESP8266 "GPIO0 + EN" reset dance on top of. `dtr=True` /
-    `rts=True` means the signal is ASSERTED — on every board covered here
-    that's wired through an inverting NPN transistor, so asserted actually
-    drives the physical pin (GPIO0 or EN) LOW. That matches how esptool.py
-    treats its own `_setDTR`/`_setRTS` calls, so the sequences in
-    uart_reset.py read the same as esptool's classic_reset/usb_reset.
+    This is the single primitive the classic ESP32/ESP8266 "GPIO0 + EN"
+    reset dance is built on top of (see init_uart_bridge() below).
+    `dtr=True` / `rts=True` means the signal is ASSERTED — on every board
+    covered here that's wired through an inverting NPN transistor, so
+    asserted actually drives the physical pin (GPIO0 or EN) LOW. That
+    matches how esptool.py treats its own `_setDTR`/`_setRTS` calls, so
+    the reset sequences here read the same as esptool's
+    classic_reset/usb_reset.
 
     Silently ignored (raises RuntimeError up to caller) if the device isn't
     one of the known bridge chips — native USB CDC boards don't have real
-    DTR/RTS lines and must use cdc_reset.py instead.
+    DTR/RTS lines and must use open_native_cdc_port() instead.
     """
     vid, pid = device.idVendor, device.idProduct
 
