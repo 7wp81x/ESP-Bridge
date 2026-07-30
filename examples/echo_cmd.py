@@ -43,6 +43,12 @@ def connect():
     eb.claim_device(device, iface, fd_wrapped=fd_wrapped)
     eb.reset_endpoint_toggles(device, ep_in, ep_out)
 
+    if eb.is_native_cdc(device):
+        # Required on ESP32-S2/S3 native-USB boards: firmware using
+        # `while (!Serial) {}` blocks in setup() until DTR is asserted.
+        ctrl_iface = eb.find_cdc_control_interface(device, iface)
+        eb.open_native_cdc_port(device, ctrl_iface)
+
     return device, ep_in, ep_out
 
 
