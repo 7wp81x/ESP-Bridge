@@ -63,6 +63,13 @@ ep_in, ep_out, iface = eb.get_cdc_endpoints(device)
 eb.claim_device(device, iface, fd_wrapped=(backend == "termux"))
 eb.reset_endpoint_toggles(device, ep_in, ep_out)
 
+if eb.is_native_cdc(device):
+    # Required on ESP32-S2/S3 native-USB boards: firmware using
+    # `while (!Serial) {}` blocks in setup() until the host asserts DTR.
+    # UART-bridge chips (CP2102/CH340/FTDI) don't need this.
+    ctrl_iface = eb.find_cdc_control_interface(device, iface)
+    eb.open_native_cdc_port(device, ctrl_iface)
+
 sender   = eb.Sender(device, ep_out)
 receiver = eb.ReceiverThread(device, ep_in); receiver.start()
 proto    = eb.Protocol(sender, receiver);    proto.start()
