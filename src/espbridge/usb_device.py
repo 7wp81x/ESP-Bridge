@@ -406,7 +406,7 @@ def find_usb_device_direct(vid_pid_filter: list[tuple] | None = None):
         "No USB device found on the bus. Is the ESP32 plugged in via OTG?"
     )
 
-def init_uart_bridge(device):
+def init_uart_bridge(device, reset: bool = True):
     """
     Sends raw vendor control requests to wake up and configure
     external hardware serial bridges to 115200 baud, 8N1.
@@ -486,8 +486,15 @@ def init_uart_bridge(device):
             device.ctrl_transfer(0x40, 0xA4, 0xFF, 0, None)  # Release → normal boot
             time.sleep(0.5)               
             
-            # Assert DTR so CH340 forwards RX data to host
-            device.ctrl_transfer(0x40, 0xA4, 0xDF, 0, None)  # DTR asserted, RTS released
+            # Hardware reset pulse — only if caller asked for it
+            if reset:
+                device.ctrl_transfer(0x40, 0xA4, 0x9F, 0, None)  # Assert DTR+RTS → reset
+                time.sleep(0.1)
+                device.ctrl_transfer(0x40, 0xA4, 0xFF, 0, None)  # Release → normal boot
+                time.sleep(0.5)
+
+            # Always re-assert DTR so CH340 forwards RX data to host
+            device.ctrl_transfer(0x40, 0xA4, 0xDF, 0, None)
             time.sleep(0.05)
 
             print("[+] CH340 successfully configured and released from reset!", flush=True)
