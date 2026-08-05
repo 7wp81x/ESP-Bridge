@@ -789,6 +789,14 @@ def get_cdc_endpoints(device):
         # Hardware UART Bridges — enumerate from descriptor instead of hardcoding.
         # Hardcoded 0x81/0x01 fails on fd-wrapped devices because set_configuration()
         # is skipped (Termux no-root) so _ep_info is never populated.
+        #
+        # Some boards (e.g. certain ESP32-WROOM-32 devkits) expose their CH340/
+        # CP2102 bridge with the bulk endpoints NOT at interface (0, 0) — or the
+        # descriptor walk otherwise doesn't find them. Hardcoding 0x81/0x01 as a
+        # fallback in that case just guesses wrong and blows up later in
+        # receiver.py/sender.py with "Invalid endpoint address". Instead, fall
+        # through to the generic interface-scanning logic below, which checks
+        # every interface on the device rather than assuming interface 0.
         try:
             intf = cfg[(0, 0)]
             eps = list(intf)
@@ -802,8 +810,7 @@ def get_cdc_endpoints(device):
                 return ep_in, ep_out, 0
         except Exception:
             pass
-        # Absolute fallback if descriptor walk failed
-        return 0x81, 0x01, 0
+        # Fall through (no hardcoded guess) to the generic bulk-pair scan below.
 
     # If a new or unknown device is plugged in, look for CDC Data class (0x0A) first
     for intf in cfg:
