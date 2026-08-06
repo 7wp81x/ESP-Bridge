@@ -66,9 +66,13 @@ eb.reset_endpoint_toggles(device, ep_in, ep_out)
 if eb.is_native_cdc(device):
     # Required on ESP32-S2/S3 native-USB boards: firmware using
     # `while (!Serial) {}` blocks in setup() until the host asserts DTR.
-    # UART-bridge chips (CP2102/CH340/FTDI) don't need this.
     ctrl_iface = eb.find_cdc_control_interface(device, iface)
     eb.open_native_cdc_port(device, ctrl_iface)
+elif eb.is_uart_bridge(device):
+    # Required on CP2102/CH340/CH9102/FTDI boards: programs the bridge to
+    # 115200 8N1 and asserts DTR so it actually forwards RX to the host.
+    # Skipping this is why PING/send_cmd() times out with no response.
+    eb.init_uart_bridge(device)
 
 sender   = eb.Sender(device, ep_out)
 receiver = eb.ReceiverThread(device, ep_in); receiver.start()

@@ -48,6 +48,11 @@ def connect():
         # `while (!Serial) {}` blocks in setup() until DTR is asserted.
         ctrl_iface = eb.find_cdc_control_interface(device, iface)
         eb.open_native_cdc_port(device, ctrl_iface)
+    elif eb.is_uart_bridge(device):
+        # Required on CP2102/CH340/CH9102/FTDI boards: programs the bridge
+        # to 115200 8N1 and asserts DTR so it forwards RX to the host.
+        # Without this, PING below will time out with no response.
+        eb.init_uart_bridge(device)
 
     return device, ep_in, ep_out
 

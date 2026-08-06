@@ -21,10 +21,15 @@ Typical usage:
     if eb.is_native_cdc(device):
         # ESP32-S2/S3 native USB-CDC boards gate `Serial` on the host
         # asserting DTR (firmware using `while (!Serial) {}` never leaves
-        # setup() otherwise). UART-bridge chips (CP2102/CH340/FTDI) don't
-        # need this - they're handled by init_uart_bridge()/set_dtr_rts().
+        # setup() otherwise). UART-bridge chips (CP2102/CH340/CH9102/FTDI)
+        # don't need this - they're handled by init_uart_bridge() below.
         ctrl_iface = eb.find_cdc_control_interface(device, iface)
         eb.open_native_cdc_port(device, ctrl_iface)
+    elif eb.is_uart_bridge(device):
+        # UART-bridge chips must be programmed to 115200 8N1 and have DTR
+        # asserted before anything will come back on the IN endpoint - skip
+        # this and send_cmd()/PING will silently time out with no response.
+        eb.init_uart_bridge(device)
 
     sender   = eb.Sender(device, ep_out)
     receiver = eb.ReceiverThread(device, ep_in)
@@ -105,6 +110,6 @@ __all__ = [
     "open_native_cdc_port", "UART_BRIDGE_VIDPIDS", "ESP32_KNOWN",
 ]
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __author__ = "7wp81x"
 __url__ = "https://github.com/7wp81x/ESP-Bridge"

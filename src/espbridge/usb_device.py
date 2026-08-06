@@ -434,8 +434,38 @@ def init_uart_bridge(device, reset: bool = True):
         except Exception as e:
             print(f"[-] Warning: CP2102 initialization encountered an error: {e}", flush=True)
 
-    # ── CASE 2: WCH CH340 / CH341 ────────────────────────────────────────────
-    elif (vid, pid) in [(0x1A86, 0x7523), (0x1A86, 0x55D4)]:
+    # ── CASE 2: WCH CH9102 / CH343 family (CDC-ACM, NOT CH340 protocol) ──────
+    # CH9102 (0x55D4) belongs to WCH's CH343/CH9101/CH9102/CH9103 family which
+    # is CDC-ACM compliant. It must NOT receive the CH340 proprietary vendor
+    # requests (0xA1/0x9A/0xA4) — those requests are silently ignored by the
+    # CH9102 silicon, leaving the bridge unconfigured and producing no output.
+    elif (vid, pid) == (0x1A86, 0x55D4):
+        print("[*] Initializing CH9102 (CDC-ACM mode)...", flush=True)
+        try:
+            import struct
+            # SET_LINE_CODING (CDC bRequest 0x20): 115200 baud, 8N1
+            # dwDTERate(4LE) + bCharFormat(1) + bParityType(1) + bDataBits(1)
+            line_coding = struct.pack("<IBBB", 115200, 0, 0, 8)
+            device.ctrl_transfer(0x21, 0x20, 0, 0, line_coding)
+
+            # SET_CONTROL_LINE_STATE (CDC bRequest 0x22): bits are ACTIVE-HIGH
+            # unlike CH340's active-low 0xA4. bit0=DTR, bit1=RTS.
+            if reset:
+                device.ctrl_transfer(0x21, 0x22, 0x03, 0, None)
+                time.sleep(0.1)
+                device.ctrl_transfer(0x21, 0x22, 0x00, 0, None)
+                time.sleep(0.5)
+
+            # Always assert DTR so CH9102 forwards RX data to host
+            device.ctrl_transfer(0x21, 0x22, 0x01, 0, None)
+            time.sleep(0.05)
+
+            print("[+] CH9102 successfully configured!", flush=True)
+        except Exception as e:
+            print(f"[-] Warning: CH9102 initialization encountered an error: {e}", flush=True)
+
+    # ── CASE 3: WCH CH340 / CH341 (proprietary vendor protocol) ─────────────
+    elif (vid, pid) in [(0x1A86, 0x7523), (0x1A86, 0x5523)]:
         print("[*] Initializing CH340 register state machine...", flush=True)
         try:
             # CH340 line initialization handshake
@@ -481,27 +511,22 @@ def init_uart_bridge(device, reset: bool = True):
             # To get a clean normal-sketch boot (not bootloader):
             #   1. Assert both  → ESP32 goes into reset
             #   2. Release both → EN rises, BOOT pin=1 → runs sketch
-            device.ctrl_transfer(0x40, 0xA4, 0x9F, 0, None)  # Assert DTR+RTS → reset
-            time.sleep(0.1)                                    # Hold reset
-            device.ctrl_transfer(0x40, 0xA4, 0xFF, 0, None)  # Release → normal boot
-            time.sleep(0.5)               
-            
-            # Hardware reset pulse — only if caller asked for it
             if reset:
                 device.ctrl_transfer(0x40, 0xA4, 0x9F, 0, None)  # Assert DTR+RTS → reset
-                time.sleep(0.1)
+                time.sleep(0.1)                                    # Hold reset
                 device.ctrl_transfer(0x40, 0xA4, 0xFF, 0, None)  # Release → normal boot
                 time.sleep(0.5)
 
-            # Always re-assert DTR so CH340 forwards RX data to host
+            # Always re-assert DTR so CH340 forwards RX data to host.
+            # 0xDF = ~0x20: bit5 low (DTR asserted), bit6 high (RTS released)
             device.ctrl_transfer(0x40, 0xA4, 0xDF, 0, None)
             time.sleep(0.05)
 
-            print("[+] CH340 successfully configured and released from reset!", flush=True)
+            print("[+] CH340 successfully configured!", flush=True)
         except Exception as e:
             print(f"[-] Warning: CH340 initialization encountered an error: {e}", flush=True)
 
-    # ── CASE 3: FTDI FT232 ───────────────────────────────────────────────────
+    # ── CASE 4: FTDI FT232 ───────────────────────────────────────────────────
     elif (vid, pid) == (0x0403, 0x6001):
         print("[*] Initializing FTDI FT232 line settings...", flush=True)
         try:
@@ -516,7 +541,7 @@ def init_uart_bridge(device, reset: bool = True):
         except Exception as e:
             print(f"[-] Warning: FTDI initialization encountered an error: {e}", flush=True)
 
-    # ── CASE 4: Native USB ESP32-S3 / C3 — no bridge init needed ─────────────
+    # ── CASE 5: Native USB ESP32-S3 / C3 — no bridge init needed ─────────────
     else:
         pass
 
@@ -550,7 +575,12 @@ def set_uart_bridge_baud(device, baud: int):
         import struct
         device.ctrl_transfer(0x40, 0x1E, 0, 0, struct.pack("<I", baud))
 
-    elif (vid, pid) in [(0x1A86, 0x7523), (0x1A86, 0x55D4)]:  # CH340/CH341
+    elif (vid, pid) == (0x1A86, 0x55D4):  # CH9102 — CDC SET_LINE_CODING
+        import struct
+        line_coding = struct.pack("<IBBB", baud, 0, 0, 8)
+        device.ctrl_transfer(0x21, 0x20, 0, 0, line_coding)
+
+    elif (vid, pid) in [(0x1A86, 0x7523), (0x1A86, 0x5523)]:  # CH340/CH341
         factor = 1532620800 // baud  # CH341_BAUDBASE_FACTOR
         divisor = 3
         while factor > 0xFFF0 and divisor:
@@ -579,8 +609,8 @@ def set_uart_bridge_baud(device, baud: int):
 # get_cdc_endpoints()'s ntailative-CDC branch above.)
 UART_BRIDGE_VIDPIDS = {
     (0x10C4, 0xEA60),  # CP2102
-    (0x1A86, 0x7523),  # CH340 / CH340G
-    (0x1A86, 0x55D4),  # CH9102
+    (0x1A86, 0x7523),  # CH340 / CH340G  (proprietary vendor protocol)
+    (0x1A86, 0x55D4),  # CH9102          (CDC-ACM protocol, separate init branch)
     (0x0403, 0x6001),  # FTDI FT232
 }
 
@@ -615,18 +645,18 @@ def set_dtr_rts(device, dtr: bool, rts: bool) -> None:
         state = (0x01 if dtr else 0) | (0x02 if rts else 0)
         device.ctrl_transfer(0x41, 0x01, 0x0300 | state, 0, None)
 
-    elif (vid, pid) in [(0x1A86, 0x7523), (0x1A86, 0x55D4)]:
-        # CH340/CH340G/CH9102: modem control byte on request 0xA4 is
-        # ACTIVE-LOW. Bit weights taken from the Linux kernel ch341.c
-        # driver (CH341_BIT_DTR/CH341_BIT_RTS), which is what actually
-        # gets exercised when esptool.py works over a real /dev/ttyUSB*:
-        #   bit5 (0x20) = DTR
-        #   bit6 (0x40) = RTS
-        # (An earlier version of this code used bit4 (0x10) for RTS,
-        # which isn't wired to anything meaningful on real hardware - RTS
-        # never actually toggled, so bootloader entry silently no-opped
-        # while everything else (line coding, DTR-only writes) kept
-        # working, which is exactly what made this bug hard to spot.)
+    elif (vid, pid) == (0x1A86, 0x55D4):
+        # CH9102 (CDC-ACM family): SET_CONTROL_LINE_STATE, bits are ACTIVE-HIGH.
+        # bit0=DTR, bit1=RTS. Completely different protocol from CH340's 0xA4.
+        value = (0x01 if dtr else 0x00) | (0x02 if rts else 0x00)
+        device.ctrl_transfer(0x21, 0x22, value, 0, None)
+
+    elif (vid, pid) in [(0x1A86, 0x7523), (0x1A86, 0x5523)]:
+        # CH340/CH340G: modem control byte on request 0xA4 is ACTIVE-LOW.
+        # Bit weights taken from the Linux kernel ch341.c driver:
+        #   bit5 (0x20) = DTR,  bit6 (0x40) = RTS
+        # (An earlier version used bit4 (0x10) for RTS which isn't wired
+        # to anything — RTS never toggled, bootloader entry silently no-opped.)
         value = 0xFF
         if dtr:
             value &= ~0x20
